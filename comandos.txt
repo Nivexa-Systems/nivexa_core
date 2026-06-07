@@ -1,0 +1,31 @@
+--- MANUAL DE OPERACIONES NIVEXA CORE ---
+
+1. GUARDAR CAMBIOS:
+   Cmd + S 
+   (Hazlo siempre en el editor antes de arrancar los programas)
+
+2. CERRAR CUALQUIER PROCESO:
+   Ctrl + C
+   (Úsalo en la terminal para detener el bot o el túnel cuando termines)
+
+3. PESTAÑA 1: TÚNEL (Carril Izquierdo)
+   source venv/bin/activate
+   python3 tunel.py
+
+4. PESTAÑA 2: BOT (Carril Derecho)
+   source venv/bin/activate
+   uvicorn main:app_web --port 8000
+
+--- NOTAS DE ARRANQUE ---
+Recuerda: Primero lanza el Túnel y luego el Bot.
+Si ves errores al arrancar, detén todo con Ctrl + C y vuelve a lanzar los comandos.
+
+1. Arrancar el Túnel (Ngrok):
+ngrok http 8000 --log=stdout
+
+2. Arrancar la terminal bot:
+python3 main.py
+
+
+arrarncar el scanner.py
+python3 scanner.py
