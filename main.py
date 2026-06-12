@@ -17,7 +17,7 @@ from supabase import create_client, Client
 from calculadora import auditar_inversion
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from scanner import ejecutar_escaneo_radar # Importamos tu nuevo escáner
+from scanner import ejecutar_escaneo_radar 
 
 # --- INICIALIZACIÓN ---
 load_dotenv()
@@ -104,16 +104,9 @@ async def pagar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(mensaje, parse_mode='Markdown')
     
 async def auditar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tg_id = update.effective_user.id
-    usuario = supabase.table("usuarios").select("estado").eq("telegram_id", tg_id).execute()
-    estado = usuario.data[0]["estado"] if usuario.data else "pendiente"
-    
-    if estado == "pendiente":
-        await update.message.reply_text("❌ Acceso restringido. Por favor, utiliza /pagar para desbloquear el nivel de auditoría profesional.")
-        return
-    
     user_text = update.message.text
     data_to_analyze = user_text
+    tg_id = update.effective_user.id
     estado_extraccion = "FALLO"
     error_log = None
     
@@ -143,18 +136,16 @@ async def auditar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 error_log = "No se pudo acceder a la URL."
         
-        if exito:
-            estado_extraccion = "EXITO"
+        if exito: estado_extraccion = "EXITO"
         
-        supabase.table("auditorias_logs").insert({
-            "telegram_id": tg_id,
-            "url_inmueble": user_text,
-            "estado_extraccion": estado_extraccion,
-            "error_log": error_log
-        }).execute()
-
-        if not exito:
-            await update.message.reply_text("⚠️ Advertencia: Extracción profesional fallida. Analizando contenido bruto.")
+        try:
+            supabase.table("auditorias_logs").insert({
+                "telegram_id": tg_id,
+                "url_inmueble": user_text,
+                "estado_extraccion": estado_extraccion,
+                "error_log": error_log
+            }).execute()
+        except: pass
     
     try:
         prompt_extraccion = f"Analiza: {data_to_analyze[:3000]}. Extrae PRECIO, ALQUILER, METROS. Responde solo formato: PRECIO,ALQUILER,METROS. Si no hay dato pon 0."
@@ -167,19 +158,26 @@ async def auditar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         numeros = respuesta_ia.split(',')
         p, a, m = a_numero(numeros[0]), a_numero(numeros[1]), a_numero(numeros[2])
         
+        # LLAMADA PROTEGIDA A CALCULADORA
         metricas = auditar_inversion(p, a, m)
+        datos_auditados_str = ""
         
-        supabase.table("historico_auditorias").insert({
-            "telegram_id": tg_id,
-            "precio": p,
-            "alquiler": a,
-            "metro": m,
-            "roi_calculado": metricas.get('roi', 0),
-            "url_inmueble": user_text
-        }).execute()
+        if metricas is not None:
+            try:
+                supabase.table("historico_auditorias").insert({
+                    "telegram_id": tg_id,
+                    "precio": p,
+                    "alquiler": a,
+                    "metro": m,
+                    "roi_calculado": metricas.get('Rentabilidad_Neta_Pct', 0),
+                    "url_inmueble": user_text
+                }).execute()
+            except: pass
+            datos_auditados_str = f"\n\nDATOS FINANCIEROS AUDITADOS: {metricas}"
         
-        prompt_final = PROTOCOLO.format(datos=data_to_analyze) + f"\n\nDATOS FINANCIEROS AUDITADOS: {metricas}"
+        prompt_final = PROTOCOLO.format(datos=data_to_analyze) + datos_auditados_str
         response = model.generate_content(prompt_final)
+        
     except Exception as e:
         print(f"Error en motor forense: {e}")
         response = model.generate_content(PROTOCOLO.format(datos=data_to_analyze))
@@ -216,14 +214,8 @@ async def guardar_configuracion(update, context):
     return ConversationHandler.END
 
 # --- LANZAMIENTO ---
-if __name__ == '__main__':
-    def run_server():
-        uvicorn.run(app_web, host="0.0.0.0", port=8000)
-    
-    threading.Thread(target=run_server, daemon=True).start()
-    
+async def main():
     request_config = HTTPXRequest(connection_pool_size=8, read_timeout=30.0, write_timeout=30.0, connect_timeout=30.0)
-    
     app = ApplicationBuilder().token(TOKEN_TELEGRAM).request(request_config).build()
     
     conv_registro = ConversationHandler(
@@ -246,11 +238,21 @@ if __name__ == '__main__':
     app.add_handler(conv_config)
     app.add_handler(CommandHandler("pagar", pagar))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auditar))
-    # --- CONFIGURACIÓN DEL RADAR (APScheduler) ---
+    
     scheduler = AsyncIOScheduler()
-    # Ejecuta el escaneo cada 2 horas (puedes ajustar 'hours=2' a 'minutes=1' para pruebas)
     scheduler.add_job(ejecutar_escaneo_radar, 'interval', hours=2, args=["TU_URL_DE_BUSQUEDA_AQUI"])
     scheduler.start()
     
     print("🚀 Sistema Nivexa Business Core activo.")
-    app.run_polling()
+    
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    await asyncio.Event().wait()
+
+if __name__ == '__main__':
+    def run_server():
+        uvicorn.run(app_web, host="0.0.0.0", port=8000)
+    
+    threading.Thread(target=run_server, daemon=True).start()
+    asyncio.run(main())
