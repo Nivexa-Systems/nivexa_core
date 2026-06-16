@@ -1,92 +1,63 @@
-import os
-from dotenv import load_dotenv
-from supabase import create_client
+import random
+import re
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
-import urllib.parse
+from googlesearch import search
+from database import es_nuevo_o_cambio  # Ya está aquí, es perfecto
 
-load_dotenv()
-supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
-
-def obtener_enlaces_busqueda(url_busqueda):
+def obtener_datos_mercado(zona):
+    query = f"precio medio m2 vivienda {zona} 2026"
     try:
-        api_key = os.getenv("SCRAPE_DO_TOKEN")
-        if not api_key:
-            print("ERROR: SCRAPE_DO_TOKEN no configurada en .env")
-            return []
+        resultados = list(search(query, num_results=2))
+        return f"Datos de mercado real: {', '.join(resultados)}"
+    except Exception:
+        return "Referencia de mercado no disponible."
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            # Simulamos ser un iPhone 13
-            iphone = p.devices['iPhone 13']
-            context = browser.new_context(**iphone)
-            page = context.new_page()
-            
-            # Navegación usando el modo super=true
-            url_codificada = urllib.parse.quote(url_busqueda)
-            proxy_url = f"http://api.scrape.do?token={api_key}&url={url_codificada}&render=true&super=true"
-            
-            print(f"DEBUG: Navegando como iPhone 13: {url_busqueda}")
-            page.goto(proxy_url, timeout=90000)
+def ejecutar_escaneo_radar(url, zona=None):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=[
+            "--no-sandbox", 
+            "--disable-blink-features=AutomationControlled",
+            "--disable-extensions"
+        ])
+        
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 720}
+        )
+        
+        page = context.new_page()
+        
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            page.wait_for_timeout(random.randint(1500, 3000))
             
             html = page.content()
-            
-            # --- LA "CHIVATA" ---
-            print(f"DEBUG: Las primeras 200 letras del HTML recibido son: {html[:200]}")
-            
-            with open("debug_idealista.html", "w", encoding="utf-8") as f:
-                f.write(html)
-            
-            browser.close()
-            
             soup = BeautifulSoup(html, 'html.parser')
-            enlaces_encontrados = soup.select('a.item-link')
-            print(f"DEBUG: Enlaces detectados: {len(enlaces_encontrados)}")
+            texto = soup.get_text(separator=' ', strip=True)
             
-            return ["https://www.idealista.com" + a.get('href') for a in enlaces_encontrados if a.get('href', '').startswith('/inmueble/')]
-    except Exception as e:
-        print(f"Error en scanner: {e}")
-        return []
+            # Limpieza y extracción
+            precio_raw = re.search(r'(\d[\d\.]*)\s*(?:€|EUR)', texto, re.IGNORECASE)
+            m2_raw = re.search(r'(\d+)\s*(?:m²|metros|m2)', texto, re.IGNORECASE)
+            
+            datos = {
+                "precio": precio_raw.group(1).replace('.', '') if precio_raw else "0",
+                "m2": m2_raw.group(1) if m2_raw else "0",
+                "mercado": obtener_datos_mercado(zona if zona else "zona del inmueble"),
+                "url": url,
+                "texto_resumen": texto[:1500]
+            }
 
-def es_nuevo(url):
-    respuesta = supabase.table("anuncios_vistos").select("url").eq("url", url).execute()
-    return len(respuesta.data) == 0
-
-def registrar_anuncio(url):
-    try:
-        supabase.table("anuncios_vistos").insert({"url": url}).execute()
-    except Exception as e:
-        print(f"Error al registrar anuncio: {e}")
-
-def ejecutar_escaneo_radar(url_busqueda):
-    print(f"--- Iniciando escaneo en: {url_busqueda} ---")
-    enlaces = obtener_enlaces_busqueda(url_busqueda)
-    
-    if not enlaces:
-        print("⚠️ No se pudieron obtener enlaces.")
-    else:
-        for link in enlaces:
-            if es_nuevo(link):
-                print(f"✅ Nuevo: {link}")
-                registrar_anuncio(link)
-            else:
-                print(f"⚪ Anuncio ya registrado: {link}")
-    print("--- Escaneo finalizado ---")
-
-def ejecutar_escaneo_nacional():
-    print("--- Consultando zonas configuradas en Supabase ---")
-    try:
-        respuesta = supabase.table("config_filtros").select("*").eq("activo", True).execute()
-        if not respuesta.data:
-            print("⚠️ No se encontraron zonas activas en Supabase.")
-            return
-
-        for config in respuesta.data:
-            url = config.get('url_busqueda')
-            if url:
-                ejecutar_escaneo_radar(url)
-    except Exception as e:
-        print(f"Error al conectar con la base de datos: {e}")
-
-if __name__ == "__main__":
-    ejecutar_escaneo_nacional()
+            # --- INTEGRACIÓN DE LA BASE DE DATOS ---
+            if datos.get("precio") and datos.get("precio") != "0":
+                anuncio_id = url.split('/')[-1] 
+                estado = es_nuevo_o_cambio(anuncio_id, int(datos["precio"]))
+                datos["estado"] = estado
+            # ---------------------------------------
+            
+            return datos
+            
+        except Exception as e:
+            return {"error": str(e)}
+        finally:
+            browser.close()

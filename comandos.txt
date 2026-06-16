@@ -29,3 +29,5 @@ python3 main.py
 
 arrarncar el scanner.py
 python3 scanner.py
+
+Comando para dejarlo encendido para siempre: pm2 start main.py --interpreter python3
