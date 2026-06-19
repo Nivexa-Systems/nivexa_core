@@ -1,37 +1,78 @@
 import asyncio
-from scanner import ejecutar_escaneo_radar
-from calculadora import auditar_inversion
+from playwright.async_api import async_playwright
 from database import supabase
- 
-async def agente_radar_autonomo():
-    """
-    Agente autónomo: Escanea, filtra según criterios de usuario 
-    y reporta solo oportunidades validadas.
-    """
-    # 1. Definir URL de escaneo (o traerla de Supabase)
-    url_target = "https://www.idealista.com/venta-viviendas/madrid/con-precio-hasta_300000/" 
-    
-    # 2. Ejecutar escaneo (bloqueante, por eso usamos run_in_executor)
-    loop = asyncio.get_running_loop()
-    resultado = await loop.run_in_executor(None, ejecutar_escaneo_radar, url_target)
-    
-    if resultado.get("estado") == "NUEVO":
-        # 3. Filtrado Inteligente (Aquí aplicas tu lógica de negocio)
-        precio = float(resultado.get("precio", 0))
-        
-        # Consultamos filtros de los usuarios registrados
-        filtros = supabase.table("config_filtros").select("*").execute()
-        
-        for config in filtros.data:
-            # Lógica de "Chollo": ¿El precio está en presupuesto?
-            if precio <= config.get("precio_max", 0):
-                # Aquí podrías añadir lógica adicional como:
-                # if calcular_roi_estimado(resultado) >= config.get("roi_min_objetivo"):
+
+async def ejecutar_escaneo_radar_local():
+    """Agente: Lee EXCLUSIVAMENTE lo que ya tienes abierto en la pestaña de Chrome."""
+    async with async_playwright() as p:
+        try:
+            print("DEBUG: Conectando a tu sesión activa de Chrome...")
+            browser = await p.chromium.connect_over_cdp("http://localhost:9222")
+            
+            page = None
+            for context in browser.contexts:
+                for p_ in context.pages:
+                    if "idealista.com" in p_.url:
+                        page = p_
+                        break
+            
+            if not page:
+                print("ERROR: No tienes ninguna pestaña de idealista.com abierta.")
+                return {"estado": "FALLO"}
+            
+            print(f"DEBUG: Leyendo pestaña: {page.url}")
+            
+            enlaces = await page.eval_on_selector_all(
+                "a", 
+                "elements => elements.filter(e => e.href.includes('/inmueble/')).map(e => e.href)"
+            )
+            
+            unique_links = list(set(enlaces))
+            
+            if not unique_links:
+                print("DEBUG: No se detectaron enlaces.")
+            else:
+                print(f"DEBUG: ÉXITO. Se han detectado {len(unique_links)} inmuebles.")
                 
-                return {
-                    "encontrado": True,
-                    "target_id": config.get("telegram_id"),
-                    "datos": resultado
+            return {"estado": "OK", "enlaces": unique_links} if unique_links else {"estado": "FALLO"}
+            
+        except Exception as e:
+            print(f"Error al conectar: {e}")
+            return {"estado": "FALLO"}
+
+async def agente_radar_autonomo():
+    """Escanea y filtra: Solo devuelve los inmuebles nuevos no registrados en Supabase."""
+    resultado = await ejecutar_escaneo_radar_local()
+    
+    if resultado.get("estado") == "OK" and resultado.get("enlaces"):
+        nuevos_inmuebles = []
+        
+        for url in resultado["enlaces"]:
+            try:
+                # Verificamos si existe antes de insertar para evitar errores de red innecesarios
+                check = supabase.table("anuncios_vistos").select("url").eq("url", url).execute()
+                
+                if not check.data:
+                    # No existe, lo insertamos
+                    supabase.table("anuncios_vistos").insert({"url": url}).execute()
+                    nuevos_inmuebles.append(url)
+                    print(f"DEBUG: Nuevo inmueble registrado -> {url}")
+                else:
+                    # Ya existe, lo saltamos
+                    continue
+            except Exception as e:
+                print(f"Error al procesar URL {url}: {e}")
+                continue
+        
+        if nuevos_inmuebles:
+            return {
+                "encontrado": True,
+                "target_id": None, 
+                "datos": {
+                    "url": nuevos_inmuebles[0],
+                    "cantidad": len(nuevos_inmuebles),
+                    "lista": nuevos_inmuebles[:5]
                 }
+            }
     
     return {"encontrado": False}

@@ -1,32 +1,31 @@
-import sqlite3
+import os
+from supabase import create_client
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Inicializamos el cliente
+supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
 def init_db():
-    conn = sqlite3.connect('radar_inmobiliario.db')
-    cursor = conn.cursor()
-    # Guardamos el ID del anuncio, el precio detectado y el timestamp
-    cursor.execute('''CREATE TABLE IF NOT EXISTS activos 
-                      (id TEXT PRIMARY KEY, precio INTEGER, url TEXT, visto_el TIMESTAMP)''')
-    conn.commit()
-    conn.close()
+    print("✅ Conectado a Supabase.")
 
-def es_nuevo_o_cambio(anuncio_id, precio_actual):
-    conn = sqlite3.connect('radar_inmobiliario.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT precio FROM activos WHERE id = ?", (anuncio_id,))
-    row = cursor.fetchone()
-    
-    if row is None:
-        # Es nuevo, lo guardamos
-        cursor.execute("INSERT INTO activos VALUES (?, ?, ?, CURRENT_TIMESTAMP)", (anuncio_id, precio_actual, ""))
-        conn.commit()
-        conn.close()
-        return "NUEVO"
-    elif row[0] != precio_actual:
-        # Ha cambiado el precio
-        cursor.execute("UPDATE activos SET precio = ? WHERE id = ?", (precio_actual, anuncio_id))
-        conn.commit()
-        conn.close()
-        return "CAMBIO_PRECIO"
-    
-    conn.close()
-    return "IGNORAR"
+def registrar_anuncio(url):
+    """
+    Intenta insertar la URL en 'anuncios_vistos'.
+    Si la URL ya existe, la restricción 'Is Unique' de Supabase evitará el duplicado 
+    y lanzará una excepción que capturamos.
+    """
+    try:
+        supabase.table("anuncios_vistos").insert({"url": url}).execute()
+        return True # Es nuevo y se guardó
+    except Exception as e:
+        # Si llega aquí es porque ya existe o hubo error
+        return False # No es nuevo o falló la inserción
+
+def es_nuevo(url):
+    """
+    Verifica si una URL ya ha sido vista.
+    """
+    response = supabase.table("anuncios_vistos").select("url").eq("url", url).execute()
+    return len(response.data) == 0
